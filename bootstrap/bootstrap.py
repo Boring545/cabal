@@ -162,36 +162,39 @@ def check_builtin(dep: BuiltinDep, ghc: Compiler) -> None:
                    check=True, stdout=subprocess.DEVNULL)
     print(f'Using {dep.package}-{dep.version} from GHC...')
     return
+# 
+def resolve_dep(dep: BootstrapDep) -> Path:
 
-def resolve_dep(dep : BootstrapDep) -> Path:
     if dep.source == PackageSource.HACKAGE:
-
-        tarball = TARBALLS / f'{dep.package}-{dep.version}.tar.gz'
-        verify_sha256(dep.src_sha256, tarball)
-
-        cabal_file = TARBALLS / f'{dep.package}.cabal'
-        verify_sha256(dep.cabal_sha256, cabal_file)
-
-        UNPACKED.mkdir(parents=True, exist_ok=True)
-        shutil.unpack_archive(tarball.resolve(), UNPACKED, 'gztar')
         sdist_dir = UNPACKED / f'{dep.package}-{dep.version}'
 
-        # Update cabal file with revision
-        if dep.revision is not None:
-            shutil.copyfile(cabal_file, sdist_dir / f'{dep.package}.cabal')
+        # ADD If the target directory already exists, skip decompression
+        if not sdist_dir.exists():
+            tarball = TARBALLS / f'{dep.package}-{dep.version}.tar.gz'
+            verify_sha256(dep.src_sha256, tarball)
 
-        # We rely on the presence of Setup.hs
-        if len(list(sdist_dir.glob('Setup.*hs'))) == 0:
-            with open(sdist_dir / 'Setup.hs', 'w') as f:
-                f.write('import Distribution.Simple\n')
-                f.write('main = defaultMain\n')
+            cabal_file = TARBALLS / f'{dep.package}.cabal'
+            verify_sha256(dep.cabal_sha256, cabal_file)
+
+            UNPACKED.mkdir(parents=True, exist_ok=True)
+            shutil.unpack_archive(tarball.resolve(), UNPACKED, 'gztar')
+
+            if dep.revision is not None:
+                shutil.copyfile(cabal_file, sdist_dir / f'{dep.package}.cabal')
+
+            if len(list(sdist_dir.glob('Setup.*hs'))) == 0:
+                with open(sdist_dir / 'Setup.hs', 'w') as f:
+                    f.write('import Distribution.Simple\n')
+                    f.write('main = defaultMain\n')
 
     elif dep.source == PackageSource.LOCAL:
         if dep.package in local_packages:
             sdist_dir = Path(dep.package).resolve()
         else:
             raise ValueError(f'Unknown local package {dep.package}')
+
     return sdist_dir
+
 
 def install_dep(dep: BootstrapDep, ghc: Compiler) -> None:
     dist_dir = (DISTDIR / f'{dep.package}-{dep.version}').resolve()
@@ -199,6 +202,7 @@ def install_dep(dep: BootstrapDep, ghc: Compiler) -> None:
     sdist_dir = resolve_dep(dep)
 
     install_sdist(dist_dir, sdist_dir, ghc, dep.flags, dep.component)
+
 
 def install_sdist(dist_dir: Path, sdist_dir: Path, ghc: Compiler, flags: List[str], component):
     prefix = PSEUDOSTORE.resolve()
@@ -247,17 +251,22 @@ def hash_file(h, f: BinaryIO) -> SHA256Hash:
 UnitId = NewType('UnitId', str)
 PlanUnit = NewType('PlanUnit', dict)
 
-def bootstrap(info: BootstrapInfo, ghc: Compiler) -> None:
+def bootstrap(info: BootstrapInfo, ghc: Compiler, pgname: str) -> None:
     if not PKG_DB.exists():
         print(f'Creating package database {PKG_DB}')
         PKG_DB.parent.mkdir(parents=True, exist_ok=True)
         subprocess_run([ghc.ghc_pkg_path, 'init', PKG_DB])
 
+    found_pgname = False
+
     for dep in info.builtin:
         check_builtin(dep, ghc)
 
     for dep in info.dependencies:
-        install_dep(dep, ghc)
+        if dep.package == pgname:
+            found_pgname = True
+        if found_pgname:
+            install_dep(dep, ghc)
 
 # Steps
 #######################################################################
@@ -378,7 +387,10 @@ def main() -> None:
                         help='path to prefetched bootstrap sources archive')
     parser.add_argument('--archive', dest='want_archive', action='store_true')
     parser.add_argument('--no-archive', dest='want_archive', action='store_false')
+    #ADD add a - p parameter
+    parser.add_argument('-p', '--pgname', type=str, help='compile from this package dependency')
     parser.set_defaults(want_archive=True)
+
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -447,7 +459,7 @@ def main() -> None:
           plan = gen_fetch_plan(info)
           fetch_from_plan(plan, TARBALLS)
 
-        bootstrap(info, ghc)
+        bootstrap(info, ghc, args.pgname)
         cabal_path = (BINDIR / 'cabal').resolve()
 
         print(dedent(f'''
